@@ -65,9 +65,12 @@ import RexmoteCore
         menu.addItem(applicationMenu)
         menu.addItem(editMenu)
         app.mainMenu = menu
-        let keys = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
-            let keyWindow = event.window?.isKeyWindow == true ? event.window : NSApp.keyWindow
-            return PaneWindow.routeKeyEvent(event, in: keyWindow) ? nil : event
+        let inputMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.keyDown, .keyUp, .magnify, .rotate, .swipe, .smartMagnify]
+        ) { event in
+            let window = event.window?.isKeyWindow == true ? event.window : NSApp.keyWindow
+            let handled = PaneWindow.routeKeyEvent(event, in: window) || PaneWindow.routeGesture(event, in: window)
+            return handled ? nil : event
         }
         let discovery = followRex ? RemotePaneDiscovery() : nil
         let timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -92,7 +95,7 @@ import RexmoteCore
         defer {
             timer.invalidate()
             listener.cancel()
-            if let keys { NSEvent.removeMonitor(keys) }
+            if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
         }
         app.run()
     }

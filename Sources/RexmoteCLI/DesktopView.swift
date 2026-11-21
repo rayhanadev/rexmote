@@ -96,7 +96,10 @@ final class DesktopView: NSView {
     }
 
     private func desktopPoint(_ event: NSEvent) -> CGPoint? {
-        let point = convert(event.locationInWindow, from: nil)
+        guard let window else { return nil }
+        // AppKit supplies screen coordinates for process-targeted events without a window.
+        let local = event.windowNumber <= 0 ? window.convertPoint(fromScreen: event.locationInWindow) : event.locationInWindow
+        let point = convert(local, from: nil)
         let frame = pixels.frame
         guard size.width > 0, !frame.isEmpty, frame.contains(point) else { return nil }
         return CGPoint(x: (point.x - frame.minX) / frame.width, y: (frame.maxY - point.y) / frame.height)
@@ -121,20 +124,21 @@ final class DesktopView: NSView {
         input?(.pointer(PointerInput(action: action, x: point.x, y: point.y, button: button, modifiers: Self.flags(event))))
     }
 
-    private func trackpad(_ event: NSEvent) {
-        guard window?.isKeyWindow == true, window?.firstResponder === self, !isHiddenOrHasHiddenAncestor else { return }
+    @discardableResult func forwardTrackpad(_ event: NSEvent) -> Bool {
+        guard window?.isKeyWindow == true, window?.firstResponder === self, !isHiddenOrHasHiddenAncestor else { return false }
         let phase = event.phase
         let momentum = event.type == .scrollWheel ? event.momentumPhase : []
         if phase == .began || phase == .mayBegin || (phase.isEmpty && momentum.isEmpty) {
             lastTrackpadPoint = nil
         }
         let continuing = phase == .changed || phase == .ended || phase == .cancelled || !momentum.isEmpty
-        guard let point = desktopPoint(event) ?? (continuing ? lastTrackpadPoint : nil),
+        guard let point = desktopPoint(event) ?? (continuing && event.windowNumber > 0 ? lastTrackpadPoint : nil),
             let motion = TrackpadInput(event: event, point: point, modifiers: Self.flags(event))
-        else { return }
+        else { return false }
         let finished = phase == .cancelled || momentum == .ended || (event.type != .scrollWheel && phase == .ended)
         lastTrackpadPoint = finished || (phase.isEmpty && momentum.isEmpty) ? nil : point
         input?(.trackpad(motion))
+        return true
     }
     override func mouseDown(with e: NSEvent) { pointer(e, "down") }
     override func mouseUp(with e: NSEvent) { pointer(e, "up") }
@@ -146,9 +150,9 @@ final class DesktopView: NSView {
     override func mouseDragged(with e: NSEvent) { pointer(e, "move") }
     override func rightMouseDragged(with e: NSEvent) { pointer(e, "move") }
     override func otherMouseDragged(with e: NSEvent) { pointer(e, "move") }
-    override func scrollWheel(with event: NSEvent) { trackpad(event) }
-    override func magnify(with event: NSEvent) { trackpad(event) }
-    override func rotate(with event: NSEvent) { trackpad(event) }
-    override func swipe(with event: NSEvent) { trackpad(event) }
-    override func smartMagnify(with event: NSEvent) { trackpad(event) }
+    override func scrollWheel(with event: NSEvent) { forwardTrackpad(event) }
+    override func magnify(with event: NSEvent) { forwardTrackpad(event) }
+    override func rotate(with event: NSEvent) { forwardTrackpad(event) }
+    override func swipe(with event: NSEvent) { forwardTrackpad(event) }
+    override func smartMagnify(with event: NSEvent) { forwardTrackpad(event) }
 }

@@ -19,6 +19,17 @@ final class PaneWindow: NSPanel {
         }
         return true
     }
+
+    static func routeGesture(_ event: NSEvent, in keyWindow: NSWindow?) -> Bool {
+        guard let pane = keyWindow as? PaneWindow, pane.isKeyWindow,
+            event.windowNumber <= 0 || event.windowNumber == pane.windowNumber,
+            let desktop = pane.firstResponder as? DesktopView
+        else { return false }
+        switch event.type {
+        case .magnify, .rotate, .swipe, .smartMagnify: return desktop.forwardTrackpad(event)
+        default: return false
+        }
+    }
 }
 
 @MainActor final class NativePane: NSObject, NSWindowDelegate, NSTextFieldDelegate {

@@ -1,9 +1,50 @@
 import AppKit
 import XCTest
 
+@testable import RexmoteCLI
 @testable import RexmoteCore
 
+private final class TrackpadPanel: NSPanel {
+    var focused = true
+    override var isKeyWindow: Bool { focused }
+}
+
 final class TrackpadTests: XCTestCase {
+    @MainActor func testWindowlessTrackpadEventsUseScreenCoordinatesAndStayInTheFocusedDesktop() throws {
+        let _ = NSApplication.shared
+        let panel = TrackpadPanel(contentRect: CGRect(x: 360, y: 180, width: 100, height: 100),
+                                  styleMask: .borderless, backing: .buffered, defer: false)
+        let view = DesktopView()
+        panel.contentView = view
+        XCTAssertTrue(panel.makeFirstResponder(view))
+        let bitmap = try XCTUnwrap(CGContext(data: nil, width: 100, height: 50, bitsPerComponent: 8, bytesPerRow: 400,
+                                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        view.show(try XCTUnwrap(bitmap.makeImage()))
+        view.layoutSubtreeIfNeeded()
+        let screen = try XCTUnwrap(NSScreen.screens.first)
+        func event(at x: CGFloat, _ y: CGFloat) throws -> NSEvent {
+            let cg = try XCTUnwrap(CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                           wheel1: 1, wheel2: 0, wheel3: 0))
+            let point = panel.convertPoint(toScreen: CGPoint(x: x, y: y))
+            cg.location = CGPoint(x: point.x, y: screen.frame.maxY - point.y)
+            cg.setIntegerValueField(.scrollWheelEventScrollPhase, value: 2)
+            let event = try XCTUnwrap(NSEvent(cgEvent: cg))
+            XCTAssertLessThanOrEqual(event.windowNumber, 0)
+            return event
+        }
+        var points: [CGPoint] = []
+        view.input = { if case .trackpad(let motion) = $0 { points.append(motion.point) } }
+        XCTAssertTrue(view.forwardTrackpad(try event(at: 75, 37.5)))
+        XCTAssertFalse(view.forwardTrackpad(try event(at: 75, 90))) // Letterbox, during the same gesture.
+        XCTAssertFalse(view.forwardTrackpad(try event(at: -25, 50)))
+        panel.focused = false
+        XCTAssertFalse(view.forwardTrackpad(try event(at: 75, 50)))
+        panel.focused = true
+        XCTAssertTrue(panel.makeFirstResponder(nil))
+        XCTAssertFalse(view.forwardTrackpad(try event(at: 75, 50)))
+        XCTAssertEqual(points, [CGPoint(x: 0.75, y: 0.75)])
+    }
+
     func testTrackpadWheelPreservesQuartzPrecisionPhasesAndCoordinates() throws {
         let bounds = CGRect(x: -800, y: 160, width: 801, height: 401)
         let point = CGPoint(x: 0.25, y: 0.75)
