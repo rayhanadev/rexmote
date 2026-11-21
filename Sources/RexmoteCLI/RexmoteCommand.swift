@@ -56,7 +56,7 @@ import RexmoteCore
         case "registered-panes":
             guard tail.count == 1 else { throw RexmoteError.invalid("Choose one Rex session.") }
             print(String(decoding: try JSONEncoder().encode(HostedPane.list(session: tail[0])), as: UTF8.self))
-        case "--version", "-v": print("rexmote 0.7.0")
+        case "--version", "-v": print("rexmote 0.7.1")
         case "--help", "-h", "help": print(PaneCommands.help)
         case "open": try PaneCommands.open(tail)
         case "ls", "list": try PaneCommands.manage("ls", tail)

@@ -49,7 +49,7 @@ The focused pane forwards trackpad scrolling, including horizontal motion and mo
 
 ## Clipboard and Finder
 
-Copy on either side with **⌘C** and paste on the other with **⌘V**. Text, rich text, links and images travel over the pane connection, up to 32 MiB per clipboard transfer.
+Copy on either side with **⌘C** and paste on the other with **⌘V**. Panes on the same Mac and login share its clipboard, so you can paste a selection into a second pane while it is still transferring to the viewing Mac. Text, rich text, links and images travel over the pane connection, up to 32 MiB per clipboard transfer.
 
 For files, select one or more items in Finder and press **⌘C**. Open the destination folder in Finder on the other side and press **⌘V**. When copying from the pane, paste locally once Rex reports that the files are ready. When pasting into the pane, leave the destination focused while the files arrive. Finder handles naming conflicts. File transfers report their status through [Rex program activity](https://www.superlogical.com/rex/docs/build/program-status).
 

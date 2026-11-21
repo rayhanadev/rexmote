@@ -3,6 +3,8 @@ import Foundation
 /// The base advances only for frames handed to the ordered sender.
 /// Captures superseded before encoding never become delta dependencies.
 public final class FrameDiffer {
+    // Reusing the middle of a patch leaves up to four edge patches.
+    private static let scrollPatchLimit = FrameInfo.maxPatches - 3
     private var previous: Data?, previousSize: PixelSize?
     private var nextID: UInt64 = 0
     public init() {}
@@ -18,9 +20,18 @@ public final class FrameDiffer {
         var rects: [PixelRect]
         var scroll: FrameScroll?
         if let previous, previousSize == size {
-            let changes = changedRegions(in: rgba, comparedTo: previous, size: size)
-            rects = changes.count > 32 ? [full] : changes
-            if rects.count <= 29,
+            func trimmed(_ regions: [PixelRect]) -> [PixelRect] {
+                rgba.withUnsafeBytes { current in
+                    previous.withUnsafeBytes { old in
+                        regions.compactMap { Self.trim($0, stride: size.width * 4, current: current, old: old) }
+                    }
+                }
+            }
+            rects = changedRegions(in: rgba, comparedTo: previous, size: size)
+            if rects.count > FrameInfo.maxPatches {
+                rects = Self.coalesce(trimmed(rects), full: full)
+            }
+            if rects.count <= Self.scrollPatchLimit,
                 let index = rects.indices.max(by: {
                     rects[$0].width * rects[$0].height < rects[$1].width * rects[$1].height
                 }), let movement = Self.scroll(in: rects[index], size: size, image: rgba, previous: previous)
@@ -43,11 +54,7 @@ public final class FrameDiffer {
                 }
                 scroll = movement
             }
-            rects = rgba.withUnsafeBytes { current in
-                previous.withUnsafeBytes { old in
-                    rects.compactMap { Self.trim($0, stride: size.width * 4, current: current, old: old) }
-                }
-            }
+            rects = trimmed(rects)
         } else {
             rects = [full]
         }
@@ -75,6 +82,32 @@ public final class FrameDiffer {
         previous = rgba
         previousSize = size
         return Packet(.frame(info), payload: payload)
+    }
+
+    // Join neighboring runs in scan order, choosing the pair that adds the fewest unchanged pixels.
+    private static func coalesce(_ regions: [PixelRect], full: PixelRect) -> [PixelRect] {
+        var regions = regions
+        while regions.count > scrollPatchLimit {
+            var bestIndex = 0
+            var bestCost = Int.max
+            var bestBounds = full
+            for i in 1..<regions.count {
+                let a = regions[i - 1], b = regions[i]
+                let left = min(a.x, b.x), top = min(a.y, b.y)
+                let width = max(a.x + a.width, b.x + b.width) - left
+                let height = max(a.y + a.height, b.y + b.height) - top
+                let cost = width * height - a.width * a.height - b.width * b.height
+                if cost < bestCost {
+                    bestCost = cost
+                    bestIndex = i
+                    bestBounds = PixelRect(left, top, width, height)
+                }
+            }
+            regions[bestIndex - 1] = bestBounds
+            regions.remove(at: bestIndex)
+        }
+        let area = regions.reduce(0) { $0 + $1.width * $1.height }
+        return area < full.width * full.height ? regions : [full]
     }
 
     private static func compress(_ regions: [PixelRect], image: Data, size: PixelSize) throws -> [Data] {

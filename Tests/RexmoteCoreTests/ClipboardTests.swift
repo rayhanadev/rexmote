@@ -11,8 +11,8 @@ import XCTest
         return .key(KeyInput(keyCode: codes[character]!, modifiers: modifiers, event: event, text: character))
     }
 
-    private func copy(_ viewer: PaneClipboard, pane: String) throws -> UUID {
-        let packet = try XCTUnwrap(viewer.packet(for: key("c"), revision: 1, pane: pane))
+    private func copy(_ viewer: PaneClipboard, pane: String, on remoteBoard: PaneClipboard.RemoteBoard? = nil) throws -> UUID {
+        let packet = try XCTUnwrap(viewer.packet(for: key("c"), revision: 1, pane: pane, on: remoteBoard))
         guard case .input(_, _, let request) = packet.message else { throw RexmoteError.invalid("Expected Copy") }
         return try XCTUnwrap(request)
     }
@@ -60,6 +60,51 @@ import XCTest
         XCTAssertEqual(local.string(forType: .string), "copied on remote")
         XCTAssertTrue(try XCTUnwrap(viewer.packet(for: key("v"), revision: 1, pane: "A")).payload.isEmpty)
         XCTAssertFalse(try XCTUnwrap(viewer.packet(for: key("v"), revision: 1, pane: "B")).payload.isEmpty)
+    }
+
+    func testQuickPasteInAnotherPaneOnTheSameMacUsesTheRemoteSelection() throws {
+        let viewerBoard = NSPasteboard.withUniqueName(), hostBoard = NSPasteboard.withUniqueName()
+        defer { viewerBoard.releaseGlobally(); hostBoard.releaseGlobally() }
+        viewerBoard.setString("previous local copy", forType: .string)
+        let viewer = PaneClipboard(board: viewerBoard), host = HostClipboard(board: hostBoard)
+        let remoteBoard = PaneClipboard.RemoteBoard(serverID: UUID(), account: "ray")
+        _ = try copy(viewer, pane: "remote-left", on: remoteBoard)
+        hostBoard.setString("selected in the remote left pane", forType: .string)
+
+        // Both virtual displays share the same logged-in Mac's pasteboard. The copy reply is still in flight.
+        let paste = try XCTUnwrap(viewer.packet(for: key("v"), revision: 1, pane: "remote-right", on: remoteBoard))
+        var pasted: String?
+        if paste.payload.isEmpty {
+            pasted = hostBoard.string(forType: .string)
+        } else {
+            host.paste(paste.payload) { pasted = hostBoard.string(forType: .string) }
+        }
+        XCTAssertEqual(pasted, "selected in the remote left pane")
+    }
+
+    func testFinderNativePasteAcrossPanesIsScopedToTheHostAccountAndLatestLocalCopy() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let localFile = FileManager.default.temporaryDirectory.appendingPathComponent("previous-local-file")
+        XCTAssertTrue(board.writeObjects([localFile as NSURL]))
+        let viewer = PaneClipboard(board: board)
+        let source = PaneClipboard.RemoteBoard(serverID: UUID(), account: "ray")
+        let request = try copy(viewer, pane: "left", on: source)
+        XCTAssertNil(viewer.filesToPaste(in: "right", on: source))
+
+        // An untransferable remote selection still belongs to Finder on that Mac.
+        viewer.received(FinderClipboard.copyFailed, request: request, changed: true, pane: "left")
+        XCTAssertNil(viewer.filesToPaste(in: "right", on: source))
+        XCTAssertTrue(try XCTUnwrap(viewer.packet(for: key("v"), revision: 1, pane: "right", on: source)).payload.isEmpty)
+        for other in [PaneClipboard.RemoteBoard(serverID: UUID(), account: source.account),
+                      PaneClipboard.RemoteBoard(serverID: source.serverID, account: "guest")] {
+            XCTAssertEqual(viewer.filesToPaste(in: "other", on: other)?.first?.path, localFile.path)
+        }
+
+        let newer = FileManager.default.temporaryDirectory.appendingPathComponent("new-local-file")
+        board.clearContents()
+        XCTAssertTrue(board.writeObjects([newer as NSURL]))
+        XCTAssertEqual(viewer.filesToPaste(in: "right", on: source)?.first?.path, newer.path)
     }
 
     func testLateOrUnrequestedRepliesCannotReplaceANewerCopy() throws {

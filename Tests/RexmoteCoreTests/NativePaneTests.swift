@@ -64,6 +64,32 @@ final class NativePaneTests: XCTestCase {
         XCTAssertTrue(anchor.accepts(rest.offsetBy(dx: 12, dy: 8), now: 0.71, dragging: true))
     }
 
+    func testAReversibleOrPausedSpaceSwipeNeverBecomesThePanelFrame() {
+        var anchor = WindowAnchor()
+        let parent = CGRect(x: 12, y: 80, width: 940, height: 720)
+        let panel = CGRect(x: 40, y: 144, width: 700, height: 600)
+        XCTAssertFalse(anchor.accepts(parent, now: 0, dragging: false))
+        XCTAssertTrue(anchor.accepts(parent, now: 0.1, dragging: false))
+
+        for (time, offset) in [(0.2, 200.0), (0.7, 200.0), (0.9, 100.0)] {
+            let transformed = WindowAnchor.isAnimating(panel: panel, presented: panel.offsetBy(dx: offset, dy: 0))
+            XCTAssertTrue(transformed)
+            XCTAssertFalse(anchor.accepts(parent.offsetBy(dx: offset, dy: 0), now: time,
+                                          dragging: true, panelIsAnimating: transformed))
+        }
+        XCTAssertFalse(WindowAnchor.isAnimating(panel: panel, presented: panel.offsetBy(dx: 0.5, dy: 0.5)))
+        XCTAssertTrue(WindowAnchor.isAnimating(panel: panel, presented: panel.insetBy(dx: 70, dy: 50)))
+        XCTAssertFalse(anchor.accepts(parent, now: 1, dragging: false))
+        XCTAssertTrue(anchor.accepts(parent, now: 1.1, dragging: false))
+    }
+
+    func testRememberedRexWindowStaysBoundWhenAnotherSpaceHasTheSameTitle() {
+        XCTAssertEqual(WindowAnchor.parent(remembered: nil, named: [2], visible: [1, 2]), 2)
+        XCTAssertNil(WindowAnchor.parent(remembered: 2, named: [1], visible: [1]))
+        XCTAssertEqual(WindowAnchor.parent(remembered: 2, named: [1], visible: [1, 2]), 2)
+        XCTAssertNil(WindowAnchor.parent(remembered: nil, named: [1, 2], visible: [1, 2]))
+    }
+
     @MainActor func testDesktopFillsThePaneAndSignInStaysInTheSameWindow() throws {
         let pane = try NativePane(id: "surface", scope: scope, pid: 42, origin: remote)
         pane.start()
@@ -209,13 +235,13 @@ final class NativePaneTests: XCTestCase {
         view.show(try XCTUnwrap(bitmap.makeImage()))
         var clicks: [PointerInput] = []
         view.input = { if case .pointer(let pointer) = $0 { clicks.append(pointer) } }
-        func click(_ x: CGFloat, _ y: CGFloat) throws {
+        func click(_ x: CGFloat, _ y: CGFloat, count: Int = 1, type: NSEvent.EventType = .leftMouseDown) throws {
             let event = try XCTUnwrap(
                 NSEvent.mouseEvent(
-                    with: .leftMouseDown, location: CGPoint(x: x, y: y),
+                    with: type, location: CGPoint(x: x, y: y),
                     modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0,
-                    clickCount: 1, pressure: 1))
-            view.mouseDown(with: event)
+                    clickCount: count, pressure: 1))
+            if type == .leftMouseDown { view.mouseDown(with: event) } else { view.mouseUp(with: event) }
         }
         view.layoutSubtreeIfNeeded()
         try click(80, 10)
@@ -228,6 +254,17 @@ final class NativePaneTests: XCTestCase {
         try click(60, 90)
         XCTAssertEqual(clicks.last?.x, 0.25)
         XCTAssertEqual(clicks.last?.y, 0.25)
+        clicks.removeAll()
+        for count in 1...3 {
+            try click(60, 90, count: count)
+            try click(60, 90, count: count, type: .leftMouseUp)
+        }
+        let decoded = try JSONDecoder().decode([PointerInput].self, from: JSONEncoder().encode(clicks))
+        XCTAssertEqual(decoded.map(\.clickCount), [1, 1, 2, 2, 3, 3])
+        let legacy = Data(#"{"action":"down","x":0.25,"y":0.25,"button":0,"modifiers":0}"#.utf8)
+        let oldClick = try JSONDecoder().decode(PointerInput.self, from: legacy)
+        XCTAssertTrue(oldClick.valid)
+        XCTAssertNil(oldClick.clickCount)
     }
 
     func testSSHPinsTheSessionHostBeforeAuthenticationAndScopesConnectionReuse() throws {

@@ -74,6 +74,32 @@ final class CoreTests: XCTestCase {
         XCTAssertThrowsError(try PixelCompression.decompress(Data(compressed.dropLast()), expected: 256))
         XCTAssertThrowsError(try PixelCompression.decompress(compressed + Data([0]), expected: 256))
     }
+    func testManyIsolatedChangesStayWithinThePatchBudgetWithoutResendingTheScreen() throws {
+        let size = PixelSize(2051, 715)
+        let differ = FrameDiffer()
+        var receiver = FrameBuffer()
+        var pixels = Data(repeating: 0, count: size.width * size.height * 4)
+        for step in 0..<4 {
+            if step != 0 {
+                for y in stride(from: 9, to: size.height, by: 128) {
+                    for x in stride(from: step, to: size.width, by: 256) {
+                        pixels[(y * size.width + x) * 4] = UInt8(x % 250 + step)
+                    }
+                }
+                pixels[pixels.count - 1] = UInt8(step)
+            }
+            let packet = try XCTUnwrap(differ.encode(rgba: pixels, size: size, captureTime: Double(step)))
+            guard case .frame(let frame) = packet.message else { return XCTFail() }
+            if step > 0 {
+                XCTAssertFalse(frame.full)
+                XCTAssertLessThanOrEqual(frame.patches.count, 32)
+                let area = frame.patches.reduce(0) { $0 + $1.rect.width * $1.rect.height }
+                XCTAssertLessThan(area, size.width * size.height / 25)
+            }
+            try receiver.apply(frame, payload: packet.payload)
+            XCTAssertEqual(receiver.pixels, pixels)
+        }
+    }
     func testScrollingReusesRowsAndReconstructsEveryPixelInBothDirections() throws {
         let size = PixelSize(768, 512)
         let encoder = FrameDiffer()

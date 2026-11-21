@@ -7,12 +7,30 @@ struct WindowAnchor {
     private var sample: CGRect?
     private(set) var changedAt: TimeInterval = 0
 
-    mutating func accepts(_ frame: CGRect, now: TimeInterval, dragging: Bool) -> Bool {
+    mutating func accepts(_ frame: CGRect, now: TimeInterval, dragging: Bool, panelIsAnimating: Bool = false) -> Bool {
+        if panelIsAnimating {
+            sample = nil
+            changedAt = now
+            return false
+        }
         if sample != frame {
             sample = frame
             changedAt = now
         }
         return dragging || now - changedAt >= 0.08
+    }
+
+    // Both rectangles are in WindowServer coordinates. AppKit keeps the panel's logical
+    // frame during a Spaces animation; the compositor can translate or scale its surface.
+    static func isAnimating(panel: CGRect, presented: CGRect) -> Bool {
+        abs(panel.minX - presented.minX) > 1 || abs(panel.minY - presented.minY) > 1
+            || abs(panel.width - presented.width) > 1 || abs(panel.height - presented.height) > 1
+    }
+
+    static func parent(remembered: Int?, named: [Int], visible: [Int]) -> Int? {
+        if let remembered { return visible.contains(remembered) ? remembered : nil }
+        if named.count == 1 { return named[0] }
+        return visible.count == 1 ? visible[0] : nil
     }
 }
 
@@ -179,15 +197,35 @@ struct WindowAnchor {
             as? [[String: Any]] ?? []
         let windows = info.compactMap(Window.init)
         let parents = windows.filter { $0.owner == rexPID && $0.frame.width > 60 && $0.frame.height > 60 }
-        let ids = Set(parents.map(\.id))
+        let parentIDs = parents.map(\.id)
+        let ids = Set(parentIDs)
         anchors = anchors.filter { ids.contains($0.key) }
-        let dragging = NSEvent.pressedMouseButtons & 1 != 0
+        let byID = Dictionary(uniqueKeysWithValues: windows.map { ($0.id, $0) })
+        let animating = Set(panes.values.compactMap { pane -> Int? in
+            guard let parent = pane.session.parent, let presented = byID[pane.number]?.frame,
+                let panel = NSApp.window(withWindowNumber: pane.number), panel.isVisible
+            else { return nil }
+            let frame = panel.frame
+            let model = CGRect(x: frame.minX, y: screen.frame.maxY - frame.maxY, width: frame.width, height: frame.height)
+            return WindowAnchor.isAnimating(panel: model, presented: presented) ? parent : nil
+        })
+        var dragged: Int?
+        if NSEvent.pressedMouseButtons & 1 != 0 {
+            let mouse = NSEvent.mouseLocation
+            let pointer = CGPoint(x: mouse.x, y: screen.frame.maxY - mouse.y)
+            if let target = windows.first(where: { $0.frame.contains(pointer) }), ids.contains(target.id) {
+                dragged = target.id
+            }
+        }
         let settled = Set(
-            parents.filter { anchors[$0.id, default: WindowAnchor()].accepts($0.frame, now: now, dragging: dragging) }
+            parents.filter {
+                anchors[$0.id, default: WindowAnchor()].accepts(
+                    $0.frame, now: now, dragging: dragged == $0.id, panelIsAnimating: animating.contains($0.id))
+            }
                 .map(\.id))
         if parents.isEmpty {
             schedule(every: 0.25)
-        } else if dragging || anchors.values.contains(where: { now - $0.changedAt < 0.3 }) {
+        } else if dragged != nil || anchors.values.contains(where: { now - $0.changedAt < 0.3 }) {
             schedule(every: 1 / 24)
         } else {
             schedule(every: 0.12)
@@ -214,11 +252,9 @@ struct WindowAnchor {
                 !session.label.isEmpty && ($0.title == session.label || $0.title.hasSuffix(" - " + session.label))
             }
             // Keep the same Rex window across Spaces even when another Rex window becomes visible.
-            let current = parents.first { $0.id == session.parent }
-            let parent =
-                named.count == 1
-                ? named.first : current ?? (session.parent == nil && parents.count == 1 ? parents.first : nil)
-            guard let parent else {
+            guard let id = WindowAnchor.parent(remembered: session.parent, named: named.map(\.id), visible: parentIDs),
+                let parent = byID[id]
+            else {
                 if let id = session.parent,
                     (CGWindowListCopyWindowInfo(.optionIncludingWindow, CGWindowID(id)) as NSArray?)?.count == 0
                 {

@@ -45,6 +45,9 @@ final class PaneWindow: NSPanel {
     private var desktop: DesktopView { content.desktop }
     private var activity = FileTransferActivity.clear
     private let activityQueue = DispatchQueue(label: "rexmote.file-activity")
+    private var remoteClipboard: PaneClipboard.RemoteBoard? {
+        origin.map { PaneClipboard.RemoteBoard(serverID: scope.serverID, account: $0.account) }
+    }
     private var pendingFilePaste: UUID?
     private var fileUpload: Task<Void, Never>?
     private var promptTicket = UUID().uuidString
@@ -374,7 +377,7 @@ final class PaneWindow: NSPanel {
         else { return }
         if case .key(let key) = event, let action = key.clipboardAction {
             if activity.isFinished { fileTransferStatus(.clear) }
-            if action == .paste, let origin, let files = PaneClipboard.shared.filesToPaste(in: info.id) {
+            if action == .paste, let origin, let files = PaneClipboard.shared.filesToPaste(in: info.id, on: remoteClipboard) {
                 let id = UUID(), change = PaneClipboard.shared.generation
                 let input = Message.input(revision: config.revision, event: event)
                 connection.send(Packet(input, payload: FinderClipboard.reservation(id)))
@@ -397,7 +400,7 @@ final class PaneWindow: NSPanel {
                 return
             }
         }
-        if let packet = PaneClipboard.shared.packet(for: event, revision: config.revision, pane: info.id) {
+        if let packet = PaneClipboard.shared.packet(for: event, revision: config.revision, pane: info.id, on: remoteClipboard) {
             connection.send(packet)
         }
     }

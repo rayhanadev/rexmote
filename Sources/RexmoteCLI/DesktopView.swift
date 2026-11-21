@@ -121,7 +121,9 @@ final class DesktopView: NSView {
         case 2: button = 1
         default: return
         }
-        input?(.pointer(PointerInput(action: action, x: point.x, y: point.y, button: button, modifiers: Self.flags(event))))
+        let clicks = event.type == .mouseMoved ? nil : Int32(clamping: event.clickCount)
+        input?(.pointer(PointerInput(
+            action: action, x: point.x, y: point.y, button: button, modifiers: Self.flags(event), clickCount: clicks)))
     }
 
     @discardableResult func forwardTrackpad(_ event: NSEvent) -> Bool {

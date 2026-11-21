@@ -66,6 +66,7 @@ import RexmoteCore
             }
             let event = CGEvent(
                 mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: activeButton)
+            if let count = p.clickCount { event?.setIntegerValueField(.mouseEventClickState, value: Int64(count)) }
             event?.flags = Self.flags(p.modifiers)
             post(event)
         case .trackpad(let motion):

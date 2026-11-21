@@ -154,18 +154,20 @@ public struct KeyInput: Codable, Equatable {
 }
 public struct PointerInput: Codable, Equatable {
     public var action: String, x: Double, y: Double, button: Int, modifiers: Int
+    public var clickCount: Int32?
     public init(
-        action: String, x: Double, y: Double, button: Int = 0, modifiers: Int = 0
+        action: String, x: Double, y: Double, button: Int = 0, modifiers: Int = 0, clickCount: Int32? = nil
     ) {
         self.action = action
         self.x = x
         self.y = y
         self.button = button
         self.modifiers = modifiers
+        self.clickCount = clickCount
     }
     public var valid: Bool {
         x.isFinite && y.isFinite && (0...1).contains(x) && (0...1).contains(y)
-            && (0...2).contains(button) && ["move", "down", "up"].contains(action)
+            && (0...2).contains(button) && ["move", "down", "up"].contains(action) && (clickCount ?? 0) >= 0
     }
 }
 public enum RemoteInput: Codable, Equatable {
@@ -193,6 +195,7 @@ public struct FrameScroll: Codable {
     }
 }
 public struct FrameInfo: Codable {
+    static let maxPatches = 32
     public var scroll: FrameScroll?
     public var revision: UInt64 = 0
     public var id: UInt64, size: PixelSize, full: Bool, captureTime: Double, patches: [Patch]
@@ -207,7 +210,7 @@ public struct FrameInfo: Codable {
         try decodePatches(payload: payload) { _, _ in }
     }
     public func decodePatches(payload: Data, apply: (PixelRect, Data) -> Void) throws {
-        guard size.valid, captureTime.isFinite, patches.count <= 32,
+        guard size.valid, captureTime.isFinite, patches.count <= Self.maxPatches,
             !patches.isEmpty || scroll != nil,
             scroll.map({ !full && $0.fits(size) }) ?? true
         else {
