@@ -45,6 +45,10 @@ Rexmote targets **macOS 14 or later**. You need two Macs, the Xcode Command Line
 
 Each display belongs to its pane until you close it. Two panes on the same host are two displays in the same macOS login session. Focus the app you want to control, just as you would on a Mac with multiple monitors.
 
+If the pane says the host is locked, unlock macOS on the session host and leave the pane open. Rexmote checks the login session and resumes automatically. If another user is active, switch back to the account that hosts the Rex session.
+
+If Codex has taken control of the host using **Locked use**, stop its Computer Use task and unlock the Mac before taking over in Rex. During a protected task, keyboard or pointer input can make Codex relock the Mac. [OpenAI’s Locked use guide](https://learn.chatgpt.com/docs/computer-use#locked-use)
+
 The focused pane forwards trackpad scrolling, including horizontal motion and momentum. It also forwards pinch, rotation, smart magnify and swipe events that macOS delivers to the pane. The receiving app determines what each gesture does.
 
 ## Clipboard and Finder

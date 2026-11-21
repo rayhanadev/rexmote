@@ -3,28 +3,73 @@ import ApplicationServices
 import RexmoteCore
 import ScreenCaptureKit
 
+enum DesktopSessionState {
+    case active, locked, inactive, unavailable
+
+    init(snapshot: [String: Any]?, uid: uid_t) {
+        guard let snapshot, uid != 0, let user = snapshot[kCGSessionUserIDKey] as? NSNumber,
+            CFGetTypeID(user) != CFBooleanGetTypeID(), let sessionUID = uid_t(exactly: user),
+            let onConsole = snapshot[kCGSessionOnConsoleKey] as? Bool,
+            let loggedIn = snapshot[kCGSessionLoginDoneKey] as? Bool
+        else { self = .unavailable; return }
+        guard sessionUID == uid, loggedIn else { self = .inactive; return }
+        // WindowServer omits the lock flag when the desktop is unlocked.
+        if let lock = snapshot["CGSSessionScreenIsLocked"] {
+            guard let locked = lock as? Bool else { self = .unavailable; return }
+            if locked { self = .locked; return }
+        }
+        self = onConsole ? .active : .inactive
+    }
+
+    static func current() -> Self {
+        Self(snapshot: CGSessionCopyCurrentDictionary() as? [String: Any], uid: geteuid())
+    }
+
+    var interruption: (state: String, detail: String)? {
+        switch self {
+        case .active: return nil
+        case .locked: return ("locked", "Unlock the remote Mac. This pane will resume automatically.")
+        case .inactive: return ("inactive", "Switch to this account on the remote Mac. This pane will resume automatically.")
+        case .unavailable: return ("unavailable", "Waiting for macOS to confirm the graphical session.")
+        }
+    }
+}
+
 final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     let pump: FramePump
-    let lock = NSLock()
-    var enabled = true
+    private let lock = NSLock()
+    private enum State {
+        case starting(CaptureImage?), streaming, stopped
+    }
+    private var state: State = .starting(nil)
     var failed: ((String) -> Void)?
     init(pump: FramePump) { self.pump = pump }
-    func disable() {
-        lock.lock()
-        enabled = false
-        lock.unlock()
+    func enable() {
+        lock.withLock {
+            guard case .starting(let first) = state else { return }
+            state = .streaming
+            if let first { pump.offer(first) }
+        }
     }
+    func disable() { lock.withLock { state = .stopped } }
     func stream(_ stream: SCStream, didStopWithError error: Error) { failed?(error.localizedDescription) }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard enabled, type == .screen, sample.isValid,
+        guard type == .screen, sample.isValid,
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],
             attachments.first?[.status] as? Int == SCFrameStatus.complete.rawValue,
             let buffer = sample.imageBuffer
         else { return }
-        pump.offer(CaptureImage(buffer: buffer, time: ProcessInfo.processInfo.systemUptime))
+        offer(CaptureImage(buffer: buffer, time: ProcessInfo.processInfo.systemUptime))
+    }
+    func offer(_ image: CaptureImage) {
+        lock.withLock {
+            switch state {
+            case .starting: state = .starting(image)
+            case .streaming: pump.offer(image)
+            case .stopped: break
+            }
+        }
     }
 }
 
@@ -45,13 +90,15 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     var displays: [DisplayInfo] = []
     private var lastStatus: HostStatus?
     private let clipboard = HostClipboard(board: .general)
-    var desktopActive = true
+    private let sessionState: () -> DesktopSessionState
+    private var pendingTransition: DesktopSessionState?
     let paneDisplay = PaneDisplay()
     private var modeRequestedAt = 0.0
     let power = PowerLease()
-    init(request: LaunchRequest, connection: WireSocket) {
+    init(request: LaunchRequest, connection: WireSocket, sessionState: @escaping () -> DesktopSessionState = DesktopSessionState.current) {
         self.request = request
         self.connection = connection
+        self.sessionState = sessionState
         pump = FramePump(connection: connection)
         input = InputController()
         super.init()
@@ -73,18 +120,19 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         center.addObserver(
             self, selector: #selector(screenChanged), name: NSWorkspace.screensDidSleepNotification, object: nil)
         center.addObserver(
-            self, selector: #selector(sleeping), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+            self, selector: #selector(sessionWillSuspend(_:)), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
         center.addObserver(
             self, selector: #selector(screenChanged), name: NSWorkspace.screensDidWakeNotification, object: nil)
         center.addObserver(
-            self, selector: #selector(waking), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+            self, selector: #selector(sessionMayResume), name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
         NotificationCenter.default.addObserver(
             self, selector: #selector(screenChanged),
             name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        for name in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
-            DistributedNotificationCenter.default().addObserver(
-                self, selector: #selector(screenChanged), name: Notification.Name(name), object: nil)
-        }
+        let distributed = DistributedNotificationCenter.default()
+        distributed.addObserver(self, selector: #selector(sessionWillSuspend(_:)),
+                                name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        distributed.addObserver(self, selector: #selector(sessionMayResume),
+                                name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -128,9 +176,7 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 input.releaseAll()
                 return
             }
-            guard let desired, revision == desired.revision, applied?.revision == revision,
-                desired.control, !desired.paused, desktopActive, !isLocked, input.enabled, lastStatus?.state == "streaming"
-            else {
+            guard canControl(revision: revision) else {
                 if let copyRequest { sendCopy(copyRequest, changed: false, contents: Data()) }
                 if let id = FinderClipboard.id(in: packet.payload) { try? connection.send(Packet(.filePasteResult(id, applied: false))) }
                 return
@@ -142,19 +188,19 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                         perform: { try input.handle(event) },
                         canRead: { [weak self] in
                             guard let self else { return false }
-                            return !self.stopped && self.desktopActive && !self.isLocked
+                            return self.canControl(revision: revision)
                                 && NSWorkspace.shared.frontmostApplication?.processIdentifier == application
                         },
                         reply: { [weak self] changed, contents in
-                            self?.sendCopy(copyRequest, changed: changed, contents: contents)
+                            guard let self else { return }
+                            let allowed = self.canControl(revision: revision)
+                            self.sendCopy(copyRequest, changed: allowed && changed, contents: allowed ? contents : Data())
                         })
                 } else if let reservation = FinderClipboard.reservedID(in: packet.payload) {
                     clipboard.reserve(reservation)
                 } else if let id = FinderClipboard.id(in: packet.payload), case .key(let key) = event {
                     clipboard.pasteFiles(id, canPaste: { [weak self] in
-                        guard let self else { return false }
-                        return !self.stopped && self.desired?.revision == revision && self.input.enabled
-                            && self.desktopActive && !self.isLocked
+                        self?.canControl(revision: revision) == true
                     }, finished: { [connection] applied in
                         try? connection.send(Packet(.filePasteResult(id, applied: applied)))
                     }, perform: { [input] in
@@ -181,8 +227,24 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             do { try connection.send(packet) } catch { connection.close() }
         }
     }
-    var isLocked: Bool {
-        (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool == true
+    private var desktopState: DesktopSessionState {
+        let current = sessionState()
+        return current == .active ? pendingTransition ?? .active : current
+    }
+
+    func canControl(revision: UInt64) -> Bool {
+        guard !stopped, let desired, desired.revision == revision, applied?.revision == revision,
+            desired.control, !desired.paused, input.enabled, lastStatus?.state == "streaming"
+        else { return false }
+        return desktopState == .active
+    }
+
+    /// Capture setup yields to the main actor while macOS can lock, switch users, or resize the pane.
+    private func canCapture(_ configuration: Configuration?) async -> Bool {
+        guard !stopped, desired?.revision == configuration?.revision else { return false }
+        guard let reason = desktopState.interruption else { return true }
+        await stopCapture(interruption: reason)
+        return false
     }
     func scheduleReconcile() {
         guard !stopped else { return }
@@ -200,42 +262,45 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func reconcile() async {
         guard !stopped else { return }
         let configuration = desired
-        if isLocked || !desktopActive {
-            await stopCapture()
-            power.end()
-            sendStatus(
-                state: "locked", detail: "Unlock or switch to this macOS account. The pane will resume automatically.")
-            return
-        }
+        guard await canCapture(configuration) else { return }
         if let c = configuration, !c.paused { power.begin() } else { power.end() }
         do {
             guard CGPreflightScreenCaptureAccess() else {
                 await stopCapture()
+                guard await canCapture(configuration) else { return }
                 power.end()
                 displays = []
                 sendStatus(
                     state: "permission", detail: "Screen Recording is required. Choose Open Permissions in the pane.")
                 return
             }
-            if let c = configuration, !c.paused {
-                let mode = c.virtualMode ?? VirtualDisplayMode(viewport: CGSize(width: c.maxWidth, height: c.maxHeight))
-                if mode != paneDisplay.mode {
-                    await stopCapture()
-                    guard !stopped, desired?.revision == c.revision, desktopActive, !isLocked else { return }
-                    modeRequestedAt = ProcessInfo.processInfo.systemUptime
-                }
-                do { try paneDisplay.apply(mode) } catch {
-                    if paneDisplay.id == nil {
-                        sendStatus(
-                            state: "unavailable",
-                            detail: "macOS declined this desktop size. Resize the pane or reconnect. "
-                                + error.localizedDescription)
-                        return
-                    }
+            guard let c = configuration else {
+                sendStatus(state: "ready", detail: "Ready to create this pane’s desktop.")
+                return
+            }
+            guard !c.paused else {
+                await stopCapture()
+                guard await canCapture(c) else { return }
+                applied = c
+                sendStatus(state: "paused", detail: "Sharing is paused while this pane is hidden.")
+                return
+            }
+            let requested = c.virtualMode ?? VirtualDisplayMode(viewport: CGSize(width: c.maxWidth, height: c.maxHeight))
+            if requested != paneDisplay.mode {
+                await stopCapture()
+                guard await canCapture(c) else { return }
+                modeRequestedAt = ProcessInfo.processInfo.systemUptime
+            }
+            do { try paneDisplay.apply(requested) } catch {
+                if paneDisplay.id == nil {
+                    sendStatus(
+                        state: "unavailable",
+                        detail: "macOS declined this desktop size. Resize the pane or reconnect. " + error.localizedDescription)
+                    return
                 }
             }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            guard !stopped, desired?.revision == configuration?.revision else { return }
+            guard await canCapture(c) else { return }
             let available = content.displays.filter { $0.displayID == paneDisplay.id }
             displays = available.map { display in
                 let bounds = CGDisplayBounds(display.displayID)
@@ -243,22 +308,9 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                     id: display.displayID, name: "Virtual Desktop",
                     x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height)
             }
-            guard let c = configuration else {
-                sendStatus(state: "ready", detail: "Ready to create this pane’s desktop.")
-                return
-            }
-            guard !c.paused, desktopActive else {
-                await stopCapture()
-                applied = c
-                sendStatus(
-                    state: "paused",
-                    detail: desktopActive
-                        ? "Sharing is paused while this pane is hidden."
-                        : "Desktop is asleep or inactive. Waiting…")
-                return
-            }
             guard let display = available.first, let geometry = displays.first else {
                 await stopCapture()
+                guard await canCapture(c) else { return }
                 awaitingDisplay()
                 return
             }
@@ -272,7 +324,7 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 display: display.displayID, nativeSize: nativeSize, frameSize: PixelSize(width, height), fps: c.fps)
             if captureFormat != format {
                 await stopCapture()
-                guard !stopped, desired?.revision == c.revision else { return }
+                guard await canCapture(c) else { return }
                 let capture = SCStreamConfiguration()
                 capture.width = width
                 capture.height = height
@@ -286,9 +338,10 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 output.failed = { [weak self, weak output] error in
                     Task { @MainActor in
                         guard let self = self, self.output === output else { return }
-                        self.captureFormat = nil
-                        self.input.enabled = false
-                        self.sendStatus(state: "unavailable", detail: "Capture interrupted: \(error). Retrying…")
+                        self.pauseCapture()
+                        if self.desktopState == .active {
+                            self.sendStatus(state: "unavailable", detail: "Capture interrupted: \(error). Retrying…")
+                        }
                         self.scheduleReconcile()
                     }
                 }
@@ -300,12 +353,17 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 self.output = output
                 self.stream = stream
                 sendStatus(state: "starting", detail: "Starting the desktop stream…")
-                pump.configure(c)
                 try await stream.startCapture()
                 guard !stopped else {
                     try? await stream.stopCapture()
                     return
                 }
+                guard await canCapture(c), self.output === output else {
+                    if self.stream === stream { await stopCapture() }
+                    return
+                }
+                pump.configure(c)
+                output.enable()
                 captureFormat = format
             } else if applied != c {
                 sendStatus(state: "starting", detail: "Refreshing the desktop…")
@@ -319,11 +377,12 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                 state: "streaming", detail: input.enabled ? "Remote desktop control" : "Viewing the remote desktop")
         } catch {
             await stopCapture()
+            guard await canCapture(configuration) else { return }
             sendStatus(
                 state: "unavailable", detail: "Desktop capture unavailable: \(error.localizedDescription). Retrying…")
         }
     }
-    func stopCapture() async {
+    private func pauseCapture() {
         input.enabled = false
         output?.disable()
         output = nil
@@ -333,8 +392,16 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             pump.configure(config)
         }
         pump.forgetDisplay()
+    }
+    private func stopCapture(interruption: (state: String, detail: String)? = nil) async {
+        pauseCapture()
         let previous = stream
         stream = nil
+        if let interruption {
+            power.end()
+            clipboard.cancel()
+            sendStatus(state: interruption.state, detail: interruption.detail)
+        }
         try? await previous?.stopCapture()
     }
 
@@ -376,17 +443,22 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         }
         if now - lastInventory >= 3 {
             lastInventory = now
+            pendingTransition = nil
             scheduleReconcile()
         }
     }
     @objc func screenChanged() { scheduleReconcile() }
-    @objc func sleeping() {
-        desktopActive = false
-        input.enabled = false
+    @objc func sessionWillSuspend(_ note: Notification) {
+        // AppKit announces a switch *before* the session dictionary changes. Stop now,
+        // then let the next inventory read the real state even if the paired notice is lost.
+        pendingTransition = note.name == NSWorkspace.sessionDidResignActiveNotification ? .inactive : .locked
+        lastInventory = ProcessInfo.processInfo.systemUptime
+        pauseCapture()
+        clipboard.cancel()
         scheduleReconcile()
     }
-    @objc func waking() {
-        desktopActive = true
+    @objc func sessionMayResume() {
+        pendingTransition = nil
         scheduleReconcile()
     }
     @objc func stopFromMenu() {

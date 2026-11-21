@@ -11,9 +11,11 @@ final class FramePump: @unchecked Sendable {
     private let lock = NSLock()
     private let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "rexmote.encoder"))
     private let differ = FrameDiffer()
-    private let connection: WireSocket
+    private let send: (Packet, () -> Bool) throws -> Void
     private var window = FlightWindow<CaptureImage>()
     private var config = Configuration(paused: true)
+    private var generation: UInt64 = 0
+    private var nextWireID: UInt64 = 0
     private var lastImage: CaptureImage?
     private var reset = true
     private var stopped = false
@@ -21,8 +23,12 @@ final class FramePump: @unchecked Sendable {
     private var scheduledAt: TimeInterval?
     var failed: ((String) -> Void)?
 
-    init(connection: WireSocket) {
-        self.connection = connection
+    convenience init(connection: WireSocket) {
+        self.init(send: connection.send(_:when:))
+    }
+
+    init(send: @escaping (Packet, () -> Bool) throws -> Void) {
+        self.send = send
         timer.setEventHandler { [weak self] in self?.tick() }
         timer.activate()
     }
@@ -30,6 +36,7 @@ final class FramePump: @unchecked Sendable {
     func configure(_ value: Configuration) {
         lock.withLock {
             config = value
+            generation &+= 1
             nextFrameAt = 0
             reset = true
             window.clearPending()
@@ -64,6 +71,7 @@ final class FramePump: @unchecked Sendable {
 
     func forgetDisplay() {
         lock.withLock {
+            generation &+= 1
             lastImage = nil
             window.clearPending()
             reset = true
@@ -96,7 +104,7 @@ final class FramePump: @unchecked Sendable {
 
     private func tick() {
         do {
-            let work: (image: CaptureImage, revision: UInt64, reset: Bool)? = try lock.withLock {
+            let work: (image: CaptureImage, revision: UInt64, generation: UInt64, reset: Bool)? = try lock.withLock {
                 scheduledAt = nil
                 guard !stopped else { return nil }
                 let now = ProcessInfo.processInfo.systemUptime
@@ -110,7 +118,7 @@ final class FramePump: @unchecked Sendable {
                 let period = 1 / Double(config.fps)
                 nextFrameAt = now - nextFrameAt >= period ? now + period : nextFrameAt + period
                 defer { reset = false }
-                return (image, config.revision, reset)
+                return (image, config.revision, generation, reset)
             }
             guard let work else { return }
             if work.reset { differ.reset() }
@@ -122,14 +130,19 @@ final class FramePump: @unchecked Sendable {
                 return
             }
             frame.revision = work.revision
+            frame.id = nextWireID
             packet.message = .frame(frame)
-            let running = lock.withLock {
-                guard !stopped else { return false }
-                window.sent(frame.id)
-                schedule()
-                return true
+            // Check under the socket's write lock so interrupted work cannot follow a lock
+            // status onto the wire. Only transmitted frames consume sequence numbers.
+            try send(packet) {
+                lock.withLock {
+                    guard !stopped, generation == work.generation else { return false }
+                    window.sent(frame.id)
+                    nextWireID += 1
+                    schedule()
+                    return true
+                }
             }
-            if running { try connection.send(packet) }
         } catch {
             stop()
             failed?(String(describing: error))

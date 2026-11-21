@@ -238,7 +238,7 @@ enum PaneCommands {
         if !positional { target = target ?? words.first }
         if let expected,
             ![
-                "ready", "authenticating", "connecting", "paused", "permission", "unavailable", "locked", "signed-out",
+                "ready", "authenticating", "connecting", "paused", "permission", "unavailable", "locked", "inactive", "signed-out",
                 "error",
             ]
             .contains(expected)

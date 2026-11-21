@@ -2,6 +2,12 @@ import AppKit
 import ImageIO
 import RexmoteCore
 
+private extension HostStatus {
+    var waitingForLoginSession: Bool {
+        state == "locked" || state == "inactive" || state == "signed-out"
+    }
+}
+
 final class PaneWindow: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
@@ -285,7 +291,8 @@ final class PaneWindow: NSPanel {
             case .status(let next):
                 self.status = next
                 if next.state == "signed-out" { self.configuration = nil }
-                if ["signed-out", "locked", "permission", "unavailable"].contains(next.state) {
+                if next.waitingForLoginSession || next.state == "permission" || next.state == "unavailable" {
+                    self.cancelFileUpload(notify: true)
                     PaneClipboard.shared.forget(self.info.id)
                     self.clearFrame()
                 }
@@ -339,7 +346,7 @@ final class PaneWindow: NSPanel {
         let inactive = !info.visible || viewport.width < 1 || viewport.height < 1
         var next = Configuration(
             maxWidth: stream.width, maxHeight: stream.height, fps: 60,
-            control: !inactive && status.accessibility == true && status.state != "locked" && credential == nil,
+            control: !inactive && status.accessibility == true && !status.waitingForLoginSession && credential == nil,
             paused: inactive)
         next.virtualMode = VirtualDisplayMode(viewport: viewport, backingScale: backingScale)
         next.revision = configuration?.revision ?? 0
@@ -409,10 +416,10 @@ final class PaneWindow: NSPanel {
             info.state = "authenticating"
         } else if info.error != nil {
             info.state = "error"
-        } else if let hostState = status?.state,
-            ["permission", "locked", "signed-out", "unavailable", "input-error"].contains(hostState)
+        } else if let status,
+            status.waitingForLoginSession || ["permission", "unavailable", "input-error"].contains(status.state)
         {
-            info.state = hostState
+            info.state = status.state
         } else if connection != nil && !info.visible {
             info.state = "paused"
         } else {
@@ -439,7 +446,10 @@ final class PaneWindow: NSPanel {
                     title: "Screen Recording required",
                     detail: "Allow Rexmote Host to record the screen on " + info.title + ".",
                     action: "Open Permissions")
-            case "locked", "signed-out": screen = .status(title: info.title, detail: status?.detail ?? "", action: nil)
+            case "locked":
+                screen = .status(title: info.title + " is locked", detail: status?.detail ?? "", action: nil)
+            case "inactive", "signed-out":
+                screen = .status(title: info.title, detail: status?.detail ?? "", action: nil)
             case "paused": screen = .status(title: "Desktop paused", detail: "", action: nil)
             default:
                 screen = .status(

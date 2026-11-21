@@ -91,7 +91,7 @@ public final class WireSocket: @unchecked Sendable {
         }
         return WireSocket(fd: fd)
     }
-    public func send(_ packet: Packet) throws {
+    public func send(_ packet: Packet, when shouldSend: () -> Bool = { true }) throws {
         let data = try packet.encoded()
         writeLock.lock()
         defer { writeLock.unlock() }
@@ -99,6 +99,7 @@ public final class WireSocket: @unchecked Sendable {
         let isClosed = closed
         stateLock.unlock()
         guard !isClosed else { throw RexmoteError.disconnected }
+        guard shouldSend() else { return }
         try data.withUnsafeBytes { bytes in
             var offset = 0
             while offset < data.count {
