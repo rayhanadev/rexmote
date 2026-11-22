@@ -2,6 +2,10 @@
 
 Open the Mac hosting your Rex session in a pane beside your terminal. Each pane gets its own virtual display. Drag the divider and the remote desktop resizes with it.
 
+![Opening a remote desktop with ⌘⇧M, resizing the pane, running installer tests, and reviewing the results in Helium and Finder.](docs/demo.gif)
+
+The demo runs Rexmote’s installer tests on the session host. The final shot shows captures from two independent desktops side by side.
+
 ## Install
 
 You need two Macs running macOS 14 or later, the Xcode Command Line Tools on both, and a working remote Rex session. Download and extract the same Rexmote release on each Mac. Run the commands below from the extracted folder. [Rex installation](https://www.superlogical.com/rex/docs/installation) · [Rexmote releases](https://github.com/rayhanadev/rexmote/releases/latest)
