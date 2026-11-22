@@ -380,4 +380,71 @@ final class DesktopSessionTests: XCTestCase {
         wait(for: [finished], timeout: 3)
         XCTAssertEqual(session.withLock { launches }, 1)
     }
+
+    func testSSHRelayForwardsControlWhileALargeClipboardReplyIsStillInTransit() throws {
+        func sockets() throws -> (WireSocket, WireSocket) {
+            var fds = [Int32](repeating: -1, count: 2)
+            guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else { throw RexmoteError.system("socketpair") }
+            return (WireSocket(fd: fds[0]), WireSocket(fd: fds[1]))
+        }
+        let (viewer, relayClient) = try sockets(), (relayHost, host) = try sockets()
+        let transport = FileHandle(fileDescriptor: relayClient.fd, closeOnDealloc: false)
+        var capacity: Int32 = 16 * 1024
+        XCTAssertEqual(setsockopt(relayClient.fd, SOL_SOCKET, SO_SNDBUF, &capacity, socklen_t(MemoryLayout.size(ofValue: capacity))), 0)
+        let relay = DesktopRelay(input: transport, output: transport, hasConsole: { true })
+        let finished = expectation(description: "Relay closed")
+        DispatchQueue.global().async {
+            defer { finished.fulfill() }
+            do {
+                try relay.run {
+                    try host.send(Packet(.hello(version: DesktopProtocol.version, token: "helper")))
+                    return (relayHost, "helper")
+                }
+            } catch { XCTFail(String(describing: error)) }
+        }
+        var output = pollfd(fd: viewer.fd, events: Int16(POLLIN), revents: 0)
+        guard poll(&output, 1, 2000) == 1, case .hello = try viewer.receive().first?.message else {
+            return XCTFail("Missing relay greeting")
+        }
+        let request = UUID(), payload = Data(repeating: 3, count: 2 * 1024 * 1024)
+        try host.send(Packet(.copied(request: request, changed: true), payload: payload))
+        guard poll(&output, 1, 2000) == 1 else { return XCTFail("Clipboard transfer did not start") }
+
+        // Leave the clipboard bytes unread so the relay exhausts its tiny send buffer.
+        try viewer.send(Packet(.input(revision: 1, event: .releaseAll)))
+        var input = pollfd(fd: host.fd, events: Int16(POLLIN), revents: 0)
+        let controls = poll(&input, 1, 1000) == 1 ? try host.receive() : []
+        XCTAssertTrue(controls.contains {
+            if case .input(_, .releaseAll, _) = $0.message { return true }
+            return false
+        }, "An outgoing clipboard transfer blocked incoming controls")
+        var packets: [Packet] = []
+        while packets.isEmpty {
+            guard poll(&output, 1, 2000) == 1 else { return XCTFail("Clipboard transfer stalled") }
+            packets = try viewer.receive()
+        }
+        let copy = try XCTUnwrap(packets.first)
+        guard case .copied(request, true) = copy.message else { return XCTFail("Wrong clipboard reply") }
+        XCTAssertEqual(copy.payload, payload)
+
+        let paste = RemoteInput.key(KeyInput(keyCode: 9, modifiers: 8, text: "v"))
+        let bytes = try Packet(.input(revision: 1, event: paste), payload: payload).encoded()
+        let clientIO = FileHandle(fileDescriptor: viewer.fd, closeOnDealloc: false)
+        try clientIO.write(contentsOf: bytes.prefix(8192))
+        guard poll(&input, 1, 2000) == 1, case .heartbeat = try host.receive().first?.message else {
+            return XCTFail("The host could not see progress on the incomplete paste")
+        }
+        try clientIO.write(contentsOf: bytes.dropFirst(8192))
+        var pasted: Packet?
+        while pasted == nil {
+            guard poll(&input, 1, 2000) == 1 else { return XCTFail("Paste did not reach the host") }
+            pasted = try host.receive().first {
+                if case .input = $0.message { return true }
+                return false
+            }
+        }
+        XCTAssertEqual(pasted?.payload, payload)
+        try viewer.send(Packet(.quit))
+        wait(for: [finished], timeout: 2)
+    }
 }

@@ -55,11 +55,9 @@ if [[ ! -L "$link" ]]; then
   linked=true
 fi
 if [[ "${3:-}" == --with-rex ]]; then
-  /usr/bin/python3 "$root/scripts/rex-config.py" install "$binary"
-  /usr/bin/python3 "$root/scripts/viewer-agent.py" install "$app" "$previous"
+  /usr/bin/python3 "$root/scripts/rex-config.py" install "$binary" install "$app" "$previous"
 elif [[ "${3:-}" == --host-only ]]; then
-  /usr/bin/python3 "$root/scripts/rex-config.py" install-host "$binary"
-  /usr/bin/python3 "$root/scripts/viewer-agent.py" update-host "$app" "$previous"
+  /usr/bin/python3 "$root/scripts/rex-config.py" install-host "$binary" update-host "$app" "$previous"
 fi
 printf 'Installed %s\nCommand %s\n' "$app" "$link"
 case ":$PATH:" in *":$bin_dir:"*) ;; *) printf 'Add %s to PATH to type rexmote from your shell.\n' "$bin_dir";; esac

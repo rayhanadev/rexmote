@@ -20,8 +20,9 @@ viewer = Path(app) / "Contents/MacOS/rexmote-viewer"
 ctl = "/bin/launchctl"
 
 loaded = subprocess.run([ctl, "print", service], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
-if plist.exists():
-    old = plistlib.loads(plist.read_bytes())
+previous_plist = plist.read_bytes() if plist.exists() else None
+if previous_plist is not None:
+    old = plistlib.loads(previous_plist)
     if old.get("Label") != label or old.get("ProgramArguments") != [str(viewer), "--follow-rex"]:
         if operation == "update-host":
             sys.exit(0)
@@ -50,17 +51,28 @@ if operation == "install":
     plist.parent.mkdir(parents=True, exist_ok=True)
     config = dict(Label=label, ProgramArguments=[str(viewer), "--follow-rex"], KeepAlive=True,
                   LimitLoadToSessionType="Aqua", ThrottleInterval=5)
-    with tempfile.NamedTemporaryFile(dir=plist.parent, delete=False) as tmp:
-        plistlib.dump(config, tmp)
-    os.replace(tmp.name, plist)
-    if subprocess.run([ctl, "print", domain], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
-        sys.exit(0)  # launchd reads LaunchAgents at the next graphical login.
-    for attempt in range(5):
-        result = subprocess.run([ctl, "bootstrap", domain, str(plist)], capture_output=True, text=True)
-        if result.returncode == 0:
-            break
-        if attempt == 4:
-            sys.exit(result.stderr)
-        time.sleep(0.25)
+
+    def write_plist(data):
+        with tempfile.NamedTemporaryFile(dir=plist.parent, delete=False) as tmp:
+            tmp.write(data)
+        os.replace(tmp.name, plist)
+
+    write_plist(plistlib.dumps(config))
+    try:
+        if subprocess.run([ctl, "print", domain], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            for attempt in range(5):
+                result = subprocess.run([ctl, "bootstrap", domain, str(plist)], capture_output=True, text=True)
+                if result.returncode == 0:
+                    break
+                if attempt == 4:
+                    raise RuntimeError(result.stderr.strip() or "Could not register the Rexmote viewer.")
+                time.sleep(0.25)
+        # Without a GUI session, launchd reads the plist at the next graphical login.
+    except (OSError, RuntimeError) as error:
+        if previous_plist is None:
+            plist.unlink(missing_ok=True)
+        else:
+            write_plist(previous_plist)
+        sys.exit(str(error))
 elif operation == "remove":
     plist.unlink(missing_ok=True)

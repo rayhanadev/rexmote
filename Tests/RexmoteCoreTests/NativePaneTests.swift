@@ -315,9 +315,13 @@ final class NativePaneTests: XCTestCase {
             window.setFrame(target, display: false)
             window.contentView?.layoutSubtreeIfNeeded()
             XCTAssertEqual(window.frame, target)
-            let heading = try XCTUnwrap(window.contentView?.subviews.flatMap(\.subviews).first { $0 is NSTextField })
-            XCTAssertGreaterThan(heading.frame.width, 0)
-            XCTAssertLessThanOrEqual(heading.frame.maxX, width)
+            let content = try XCTUnwrap(window.contentView as? PaneContent)
+            content.show(.credential(host: "Studio", prompt: "Password:"))
+            content.layoutSubtreeIfNeeded()
+            let field = content.password.convert(content.password.bounds, to: content)
+            XCTAssertGreaterThan(field.width, 0)
+            XCTAssertEqual(field.midX, content.bounds.midX, accuracy: 1)
+            XCTAssertTrue(content.bounds.contains(field))
         }
     }
 

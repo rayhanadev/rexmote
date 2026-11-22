@@ -124,6 +124,7 @@ final class PaneWindow: NSPanel {
     }
 
     func windowDidChangeBackingProperties(_ notification: Notification) { scheduleResize() }
+    func windowDidChangeOcclusionState(_ notification: Notification) { configure() }
 
     private func scheduleResize() {
         resizeWork?.cancel()
@@ -152,8 +153,9 @@ final class PaneWindow: NSPanel {
             return
         }
         let first = !info.visible
-        if first { content.applyTheme() }
+        content.refreshTheme()
         content.layer?.cornerRadius = placement.radius
+        content.layer?.maskedCorners = placement.corners
         if window.frame != placement.frame {
             window.setFrame(placement.frame, display: true, animate: false)
         }
@@ -166,11 +168,11 @@ final class PaneWindow: NSPanel {
             if rehome { window.collectionBehavior.remove(.moveToActiveSpace) }
         }
         info.visible = true
-        if placement.selected && (pendingFocus || (!rexFocused && placement.rexActive)) {
+        if placement.selected && placement.rexActive && (pendingFocus || !rexFocused) {
             pendingFocus = false
             focus()
         }
-        rexFocused = placement.selected
+        rexFocused = placement.selected && (placement.rexActive || window.isKeyWindow)
         if first {
             commitViewport()
             if connection == nil && info.error == nil { connect() } else { update() }
@@ -187,11 +189,7 @@ final class PaneWindow: NSPanel {
     private func focus() {
         info.lastUsed = Date.timeIntervalSinceReferenceDate
         window.makeKey()
-        if credential != nil {
-            window.makeFirstResponder(content.password)
-        } else {
-            window.makeFirstResponder(desktop)
-        }
+        window.makeFirstResponder(content.preferredResponder)
     }
     func windowDidBecomeKey(_ notification: Notification) {
         info.focused = true
@@ -249,7 +247,6 @@ final class PaneWindow: NSPanel {
         release()
         configure()
         update()
-        if window.isKeyWindow { window.makeFirstResponder(content.password) }
     }
 
     private func finishCredential(_ answer: String?) {
@@ -261,7 +258,6 @@ final class PaneWindow: NSPanel {
         pending.reply(answer)
         configure()
         update()
-        if window.isKeyWindow { window.makeFirstResponder(desktop) }
     }
 
     func connect() {
@@ -343,7 +339,7 @@ final class PaneWindow: NSPanel {
     private func configure() {
         guard let status, status.state != "signed-out", let connection else { return }
         let stream = PixelSize.capture(viewport: viewport, backingScale: backingScale, maxWidth: 3840)
-        let inactive = !info.visible || viewport.width < 1 || viewport.height < 1
+        let inactive = !info.visible || !window.occlusionState.contains(.visible) || viewport.width < 1 || viewport.height < 1
         var next = Configuration(
             maxWidth: stream.width, maxHeight: stream.height, fps: 60,
             control: !inactive && status.accessibility == true && !status.waitingForLoginSession && credential == nil,
@@ -420,7 +416,7 @@ final class PaneWindow: NSPanel {
             status.waitingForLoginSession || ["permission", "unavailable", "input-error"].contains(status.state)
         {
             info.state = status.state
-        } else if connection != nil && !info.visible {
+        } else if connection != nil && (!info.visible || configuration?.paused == true) {
             info.state = "paused"
         } else {
             info.state = lastImage != nil && frameRevision == configuration?.revision ? "ready" : "connecting"

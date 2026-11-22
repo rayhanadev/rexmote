@@ -277,9 +277,8 @@ public final class FrameDiffer {
 
 /// Two frames can cross the network concurrently. New captures replace the single waiting frame.
 public struct FlightWindow<Value> {
-    private var sentFrames: [(id: UInt64, time: TimeInterval)] = []
+    private var sentFrames: [UInt64] = []
     public var canSend: Bool { sentFrames.count < 2 }
-    public var oldestSendTime: TimeInterval? { sentFrames.first?.time }
     public private(set) var latest: Value?
     public private(set) var coalesced = 0
     public init() {}
@@ -294,10 +293,10 @@ public struct FlightWindow<Value> {
     }
     public mutating func sent(_ id: UInt64) {
         precondition(canSend)
-        sentFrames.append((id, ProcessInfo.processInfo.systemUptime))
+        sentFrames.append(id)
     }
     public mutating func acknowledge(_ id: UInt64) -> Bool {
-        guard sentFrames.first?.id == id else { return false }
+        guard sentFrames.first == id else { return false }
         sentFrames.removeFirst()
         return true
     }

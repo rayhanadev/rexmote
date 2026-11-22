@@ -117,8 +117,10 @@ public final class WireSocket: @unchecked Sendable {
         stateLock.unlock()
         guard !isClosed else { throw RexmoteError.disconnected }
         var bytes = [UInt8](repeating: 0, count: 65_536)
-        let count = Darwin.read(fd, &bytes, bytes.count)
-        if count < 0 && errno == EINTR { return [] }
+        var count: Int
+        repeat {
+            count = Darwin.read(fd, &bytes, bytes.count)
+        } while count < 0 && errno == EINTR
         if count == 0 {
             try decoder.finish()
             throw RexmoteError.disconnected

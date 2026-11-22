@@ -89,13 +89,10 @@ final class FramePump: @unchecked Sendable {
         }
     }
 
-    // With the lock held, arm exactly one deadline for the next frame or its acknowledgement.
+    // HostSession monitors connection liveness. Slow acknowledgements simply apply backpressure.
     private func schedule() {
         guard !stopped else { return }
-        var deadline = window.oldestSendTime.map { $0 + 10 }
-        if !config.paused, window.canSend, window.latest != nil {
-            deadline = min(deadline ?? nextFrameAt, nextFrameAt)
-        }
+        let deadline = !config.paused && window.canSend && window.latest != nil ? nextFrameAt : nil
         guard scheduledAt != deadline else { return }
         scheduledAt = deadline
         let when = deadline.map { DispatchTime.now() + max(0, $0 - ProcessInfo.processInfo.systemUptime) }
@@ -104,13 +101,10 @@ final class FramePump: @unchecked Sendable {
 
     private func tick() {
         do {
-            let work: (image: CaptureImage, revision: UInt64, generation: UInt64, reset: Bool)? = try lock.withLock {
+            let work: (image: CaptureImage, revision: UInt64, generation: UInt64, reset: Bool)? = lock.withLock {
                 scheduledAt = nil
                 guard !stopped else { return nil }
                 let now = ProcessInfo.processInfo.systemUptime
-                if let oldest = window.oldestSendTime, now - oldest >= 10 {
-                    throw RexmoteError.system("Desktop acknowledgement timed out.")
-                }
                 guard !config.paused, now >= nextFrameAt, let image = window.take() else {
                     schedule()
                     return nil

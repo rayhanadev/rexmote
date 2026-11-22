@@ -10,8 +10,7 @@ if [[ -e "$app" ]]; then
     echo "An unrelated app exists at $app." >&2; exit 1
   fi
 fi
-/usr/bin/python3 scripts/rex-config.py "remove${1:+-host}" "$app/Contents/MacOS/rexmote"
-/usr/bin/python3 scripts/viewer-agent.py remove "$app"
+/usr/bin/python3 scripts/rex-config.py "remove${1:+-host}" "$app/Contents/MacOS/rexmote" remove "$app"
 if [[ -L "$bin" && "$(readlink "$bin")" == "$app/Contents/MacOS/rexmote" ]]; then rm "$bin"; fi
 if [[ -d "$app" ]]; then rm -r "$app"; fi
 echo 'Removed rexmote.'

@@ -28,8 +28,8 @@ enum DesktopSessionState {
     var interruption: (state: String, detail: String)? {
         switch self {
         case .active: return nil
-        case .locked: return ("locked", "Unlock the remote Mac. This pane will resume automatically.")
-        case .inactive: return ("inactive", "Switch to this account on the remote Mac. This pane will resume automatically.")
+        case .locked: return ("locked", "Unlock your Mac to resume this desktop.")
+        case .inactive: return ("inactive", "Switch to this account on the remote Mac to resume.")
         case .unavailable: return ("unavailable", "Waiting for macOS to confirm the graphical session.")
         }
     }
@@ -86,7 +86,8 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     var stream: SCStream?, output: CaptureOutput?
     private var captureFormat: CaptureFormat?
     var statusItem: NSStatusItem?, timer: Timer?
-    var lastHeartbeat = ProcessInfo.processInfo.systemUptime, lastInventory = 0.0
+    private var lastClientActivity = ProcessInfo.processInfo.systemUptime
+    var lastInventory = 0.0
     var displays: [DisplayInfo] = []
     private var lastStatus: HostStatus?
     private let clipboard = HostClipboard(board: .general)
@@ -155,8 +156,9 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
     func receive(_ packet: Packet) {
         guard !stopped else { return }
+        lastClientActivity = ProcessInfo.processInfo.systemUptime
         switch packet.message {
-        case .heartbeat: lastHeartbeat = ProcessInfo.processInfo.systemUptime
+        case .heartbeat: break
         case .configure(let config):
             guard config.valid, config.revision > (desired?.revision ?? 0) else {
                 fail("Invalid desktop configuration.")
@@ -433,7 +435,7 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func tick() {
         guard !stopped else { return }
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastHeartbeat > 5 {
+        if now - lastClientActivity > 5 {
             stop()
             return
         }

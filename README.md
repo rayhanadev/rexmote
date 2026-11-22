@@ -8,12 +8,7 @@ You can use the remote Mac’s apps, send keyboard shortcuts to the focused app,
 
 Rexmote targets **macOS 14 or later**. You need two Macs, the Xcode Command Line Tools to build from source, and a remote Rex session that you can already open on the viewing Mac. Install the same revision of Rexmote on both machines. [Rex installation](https://www.superlogical.com/rex/docs/installation)
 
-1. **On both Macs**, clone the project and enter the checkout.
-
-   ```sh
-   git clone https://github.com/rayhanadev/rexmote.git
-   cd rexmote
-   ```
+1. **On both Macs**, download the source archive for the same tagged release, extract it, and open a terminal in the extracted folder. [Rexmote releases](https://github.com/rayhanadev/rexmote/releases/latest)
 
 2. **On the Mac hosting the Rex session**, sign in to the graphical desktop. In **System Settings → General → Sharing**, enable **Remote Login** for the account running that session. Install the host and open its permissions window.
 
@@ -44,6 +39,8 @@ Rexmote targets **macOS 14 or later**. You need two Macs, the Xcode Command Line
 | Focus a neighboring Rex pane | **Control–Option–arrow** |
 
 Each display belongs to its pane until you close it. Two panes on the same host are two displays in the same macOS login session. Focus the app you want to control, just as you would on a Mac with multiple monitors.
+
+The desktop stays visible when you work in an app beside Rex. Capture pauses when the pane is fully covered or on another Space and resumes when it comes back into view.
 
 If the pane says the host is locked, unlock macOS on the session host and leave the pane open. Rexmote checks the login session and resumes automatically. If another user is active, switch back to the account that hosts the Rex session.
 
@@ -76,7 +73,7 @@ rexmote info -b "$block" --json
 rexmote screenshot desktop.png -b "$block"
 ```
 
-Use `rexmote doctor` to inspect the local installation. Run `swift test` from the checkout to exercise the frame protocol, display sizing, input, clipboard and pane lifecycle. To build the signed app bundle without installing it, run `./scripts/build.sh`.
+Use `rexmote doctor` to inspect the local installation. From the checkout, run `swift test` for the pane, host, and transport tests. Run `python3 -m unittest discover -s Tests/Installer` for the installation and rollback tests. To build the signed app bundle, run `./scripts/build.sh`.
 
 ## Uninstall
 

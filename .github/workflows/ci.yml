@@ -1,0 +1,38 @@
+name: macOS checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Test the pane, host, and transport
+        # The unit tests construct panes in isolation from a running Rex installation.
+        env:
+          REXMOTE_REX_BIN: /usr/bin/false
+        run: swift test
+      - name: Test installer configuration changes
+        run: /usr/bin/python3 -m unittest discover -s Tests/Installer
+      - name: Verify the packaged app and installed command
+        env:
+          REXMOTE_SIGNING_IDENTITY: "-"
+        run: |
+          ./scripts/build.sh
+          export REXMOTE_APP_DIR="$RUNNER_TEMP/Installed Apps"
+          ./scripts/install.sh "$PWD/dist/Rexmote.app" "$RUNNER_TEMP/bin"
+          app="$REXMOTE_APP_DIR/Rexmote.app"
+          host="$app/Contents/Helpers/Rexmote Host.app"
+          version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$app/Contents/Info.plist")
+          test "$("$RUNNER_TEMP/bin/rexmote" --version)" = "rexmote $version"
+          test "$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$host/Contents/Info.plist")" = "$version"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" == v* ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+          test -x "$app/Contents/Resources/rexmote-pane"
+          test -x "$host/Contents/MacOS/rexmote-host"

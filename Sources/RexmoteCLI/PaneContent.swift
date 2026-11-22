@@ -1,58 +1,5 @@
 import AppKit
 
-/// Colors come from the same light or dark terminal theme as the surrounding Rex split.
-struct RexPalette {
-    var background = NSColor.windowBackgroundColor
-    var foreground = NSColor.labelColor
-    var accent = NSColor.controlAccentColor
-
-    private static let bundled: [String: [String: Any]] = {
-        guard
-            let url = RexCommand.localApp?.bundleURL?.appendingPathComponent(
-                "Contents/Resources/SuperUI_SuperDesignTokens.bundle/Contents/Resources/themes.json"),
-            let data = try? Data(contentsOf: url),
-            let themes = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        else { return [:] }
-        var result: [String: [String: Any]] = [:]
-        for theme in themes {
-            if let id = theme["id"] as? String { result[id] = theme["source"] as? [String: Any] }
-        }
-        return result
-    }()
-
-    @MainActor static func current(_ appearance: NSAppearance) -> RexPalette {
-        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        guard let id = PaneTracker.preference(dark ? "darkThemeID" : "lightThemeID") as? String else {
-            return RexPalette()
-        }
-        var source = bundled[id]
-        if source == nil, let data = PaneTracker.preference("customThemes") as? Data,
-            let custom = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
-        {
-            source = custom.first { $0["id"] as? String == id }?["palette"] as? [String: Any]
-        }
-        func color(_ name: String, fallback: NSColor) -> NSColor {
-            if let string = source?[name] as? String, string.count == 7, string.first == "#",
-                let hex = UInt32(string.dropFirst(), radix: 16)
-            {
-                return NSColor(
-                    srgbRed: CGFloat(hex >> 16) / 255, green: CGFloat((hex >> 8) & 255) / 255,
-                    blue: CGFloat(hex & 255) / 255, alpha: 1)
-            }
-            if let rgb = source?[name] as? [String: Any], let r = rgb["red"] as? CGFloat,
-                let g = rgb["green"] as? CGFloat, let b = rgb["blue"] as? CGFloat
-            {
-                return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
-            }
-            return fallback
-        }
-        return RexPalette(
-            background: color("background", fallback: .windowBackgroundColor),
-            foreground: color("foreground", fallback: .labelColor),
-            accent: color("cursor", fallback: .controlAccentColor))
-    }
-}
-
 final class PaneContent: NSView {
     enum Screen: Equatable {
         case desktop
@@ -60,42 +7,78 @@ final class PaneContent: NSView {
         case status(title: String, detail: String, action: String?)
     }
 
+    private final class Document: NSView {
+        override var isFlipped: Bool { true }
+    }
+
     let desktop = DesktopView()
     let password = NSSecureTextField()
     var primaryAction: (() -> Void)?
-    private let form = NSView()
-    private let heading = NSTextField(labelWithString: "")
+    private let scroll = NSScrollView()
+    private let document = Document()
+    private let stack = NSStackView()
+    private let heading = NSTextField(wrappingLabelWithString: "")
     private let detail = NSTextField(wrappingLabelWithString: "")
+    private let field = NSView()
     private let button = NSButton()
+    private lazy var stackWidth = stack.widthAnchor.constraint(equalToConstant: 260)
+    private lazy var buttonWidth = button.widthAnchor.constraint(equalToConstant: 72)
     private var screen: Screen?
     private var palette = RexPalette()
+    private var nextThemeCheck: TimeInterval = 0
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.masksToBounds = true
-        layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
         addSubview(desktop)
-        addSubview(form)
-        for view in [heading, detail, password, button] { form.addSubview(view) }
-        heading.font = .systemFont(ofSize: 17, weight: .semibold)
-        heading.lineBreakMode = .byTruncatingTail
-        detail.font = .systemFont(ofSize: 13)
-        detail.maximumNumberOfLines = 5
-        password.font = .systemFont(ofSize: 14)
+        addSubview(scroll)
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
+        scroll.autohidesScrollers = true
+        scroll.documentView = document
+        document.addSubview(stack)
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        for view in [heading, detail, field, button] { stack.addArrangedSubview(view) }
+        stack.setCustomSpacing(12, after: detail)
+        stack.setCustomSpacing(10, after: field)
+        heading.font = .systemFont(ofSize: 15, weight: .semibold)
+        detail.font = .systemFont(ofSize: NSFont.systemFontSize)
+        for label in [heading, detail] {
+            label.alignment = .center
+            label.setContentCompressionResistancePriority(.required, for: .vertical)
+            label.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+        field.wantsLayer = true
+        field.layer?.cornerRadius = 6
+        field.addSubview(password)
+        password.translatesAutoresizingMaskIntoConstraints = false
+        password.font = detail.font
         password.isBezeled = false
         password.drawsBackground = false
-        password.focusRingType = .none
-        password.placeholderString = "Password"
-        password.setAccessibilityLabel("SSH credential")
         password.target = self
         password.action = #selector(submit)
         button.target = self
         button.action = #selector(submit)
         button.isBordered = false
-        button.font = .systemFont(ofSize: 13, weight: .medium)
+        button.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         button.wantsLayer = true
         button.layer?.cornerRadius = 6
+        buttonWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            stackWidth, stack.centerXAnchor.constraint(equalTo: document.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: document.centerYAnchor),
+            field.widthAnchor.constraint(equalTo: stack.widthAnchor), field.heightAnchor.constraint(equalToConstant: 30),
+            password.leadingAnchor.constraint(equalTo: field.leadingAnchor, constant: 8),
+            password.trailingAnchor.constraint(equalTo: field.trailingAnchor, constant: -8),
+            password.centerYAnchor.constraint(equalTo: field.centerYAnchor),
+            buttonWidth, button.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor),
+            button.heightAnchor.constraint(equalToConstant: 28),
+        ])
         applyTheme()
     }
 
@@ -106,94 +89,87 @@ final class PaneContent: NSView {
         applyTheme()
     }
 
-    func applyTheme() {
-        palette = RexPalette.current(effectiveAppearance)
+    func refreshTheme() {
+        guard screen != .desktop else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now >= nextThemeCheck else { return }
+        nextThemeCheck = now + 1
+        let next = RexPalette.current(effectiveAppearance)
+        if next != palette { applyTheme(next) }
+    }
+
+    private func applyTheme(_ next: RexPalette? = nil) {
+        palette = next ?? RexPalette.current(effectiveAppearance)
         effectiveAppearance.performAsCurrentDrawingAppearance {
             layer?.backgroundColor = palette.background.cgColor
-            heading.textColor = palette.foreground
-            detail.textColor = palette.foreground.withAlphaComponent(0.75)
-            password.textColor = palette.foreground
-            password.placeholderAttributedString = NSAttributedString(
-                string: password.placeholderString ?? password.placeholderAttributedString?.string ?? "Password",
-                attributes: [.foregroundColor: palette.foreground.withAlphaComponent(0.6)])
-            button.attributedTitle = NSAttributedString(
-                string: button.title, attributes: [.foregroundColor: palette.background, .font: button.font!])
+            heading.textColor = palette.primary
+            detail.textColor = palette.secondary
+            password.textColor = palette.primary
+            if let placeholder = password.placeholderString ?? password.placeholderAttributedString?.string {
+                password.placeholderAttributedString = NSAttributedString(
+                    string: placeholder, attributes: [.foregroundColor: palette.secondary])
+            }
+            field.layer?.backgroundColor = palette.field.cgColor
+            field.layer?.borderColor = palette.border.cgColor
+            field.layer?.borderWidth = 1 / (window?.backingScaleFactor ?? 1)
+            button.contentTintColor = palette.onAccent
             button.layer?.backgroundColor = palette.accent.cgColor
         }
-        needsDisplay = true
+    }
+
+    var preferredResponder: NSResponder? {
+        if screen == .desktop { return desktop }
+        if !field.isHidden { return password }
+        return button.isHidden ? nil : button
     }
 
     func show(_ next: Screen) {
         guard next != screen else { return }
         screen = next
         desktop.isHidden = next != .desktop
-        form.isHidden = next == .desktop
+        scroll.isHidden = next == .desktop
+        defer {
+            if let window, window.isKeyWindow { window.makeFirstResponder(preferredResponder) }
+        }
         switch next {
         case .desktop: return
         case .credential(let host, let prompt):
             heading.stringValue = "Sign in to " + host
-            if prompt.localizedCaseInsensitiveContains("passphrase") {
-                password.placeholderString = "SSH key passphrase"
-                detail.stringValue = ""
-            } else if prompt.localizedCaseInsensitiveContains("password") {
-                password.placeholderString = "Password"
-                detail.stringValue = ""
-            } else {
-                password.placeholderString = "Response"
-                detail.stringValue = prompt
-            }
+            let passphrase = prompt.localizedCaseInsensitiveContains("passphrase")
+            let passwordPrompt = prompt.localizedCaseInsensitiveContains("password")
+            if passphrase { password.placeholderString = "SSH key passphrase" }
+            else if passwordPrompt { password.placeholderString = "Password" }
+            else { password.placeholderString = "Response" }
             password.setAccessibilityLabel(password.placeholderString)
-            password.isHidden = false
+            detail.stringValue = passphrase || passwordPrompt ? "" : prompt
+            field.isHidden = false
             button.title = "Sign In"
         case .status(let title, let message, let action):
             heading.stringValue = title
             detail.stringValue = message
-            password.isHidden = true
+            field.isHidden = true
             button.title = action ?? ""
         }
-        button.isHidden = button.title.isEmpty
         detail.isHidden = detail.stringValue.isEmpty
+        button.isHidden = button.title.isEmpty
+        buttonWidth.constant = ceil(button.intrinsicContentSize.width) + 20
         applyTheme()
+        scroll.contentView.scroll(to: .zero)
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
         desktop.frame = bounds
-        guard !form.isHidden else { return }
-        let width = min(320, max(1, bounds.width - min(40, bounds.width * 0.12)))
-        var y: CGFloat = 0
-        if !button.isHidden {
-            button.frame = CGRect(
-                x: 0, y: y, width: min(width, ceil(button.intrinsicContentSize.width) + 22), height: 29)
-            y += 43
-        }
-        if !password.isHidden {
-            password.frame = CGRect(x: 9, y: y + 6, width: max(1, width - 18), height: 19)
-            y += 46
-        }
-        if !detail.isHidden {
-            let size = detail.cell?.cellSize(forBounds: CGRect(x: 0, y: 0, width: width, height: 100)) ?? .zero
-            let height = max(18, min(90, ceil(size.height)))
-            detail.frame = CGRect(x: 0, y: y, width: width, height: height)
-            y += height + 8
-        }
-        heading.frame = CGRect(x: 0, y: y, width: width, height: 25)
-        y += 25
-        form.frame =
-            CGRect(x: (bounds.width - width) / 2, y: max(0, (bounds.height - y) / 2), width: width, height: y).integral
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        guard !password.isHiddenOrHasHiddenAncestor else { return }
-        let rect = convert(password.frame, from: form).insetBy(dx: -8, dy: -6)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
-        palette.foreground.withAlphaComponent(0.07).setFill()
-        path.fill()
-        palette.foreground.withAlphaComponent(0.25).setStroke()
-        path.stroke()
+        guard !scroll.isHidden else { return }
+        scroll.frame = bounds
+        let size = scroll.contentSize
+        let width = max(20, min(field.isHidden ? 340 : 260, size.width - min(32, size.width / 5)))
+        stackWidth.constant = width
+        heading.preferredMaxLayoutWidth = width
+        detail.preferredMaxLayoutWidth = width
+        document.setFrameSize(CGSize(width: size.width, height: max(size.height, ceil(stack.fittingSize.height) + 24)))
+        document.layoutSubtreeIfNeeded()
     }
 
     @objc private func submit() { primaryAction?() }

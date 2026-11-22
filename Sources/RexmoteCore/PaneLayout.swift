@@ -23,13 +23,12 @@ public struct PanePlacement: Equatable {
             return zoom == block ? Self(rect: CGRect(x: 0, y: 0, width: 1, height: 1), floating: false) : nil
         }
         let layers = (window["layers"] as? [[String: Any]] ?? []).filter { $0["state"] as? String != "minimized" }
-        for layer in layers {
+        for (index, layer) in layers.enumerated() {
             guard let rect = find(block, in: layer["layout"] as? [String: Any]) else { continue }
             let floating = layer["kind"] as? String != "tiled"
-            // A single native window cannot be clipped around an overlapping Rex layer.
-            if layers.contains(where: { other in
-                other["kind"] as? String != "tiled" && other["layer_id"] as? String != layer["layer_id"] as? String
-                    && normalized(other["bounds"])?.intersects(rect) == true
+            // session.view lists layers back to front. Only a layer above this one can cover it.
+            if layers.dropFirst(index + 1).contains(where: { other in
+                other["kind"] as? String != "tiled" && normalized(other["bounds"])?.intersects(rect) == true
             }) {
                 return nil
             }

@@ -170,7 +170,7 @@ final class DesktopLink {
     static var signedOutStatus: HostStatus {
         HostStatus(
             hostname: LocalComputer.hostname, displays: [], state: "signed-out",
-            detail: "Sign in to macOS as \(NSUserName()). This pane will connect automatically.")
+            detail: "Sign in as \(NSUserName()) on the remote Mac to connect.")
     }
 
     func close() {
@@ -198,6 +198,7 @@ func relayDesktop(_ args: [String]) throws {
 final class DesktopRelay {
     private let input: FileHandle, output: FileHandle, hasConsole: () -> Bool
     private var decoder = PacketDecoder(), buffer = [UInt8](repeating: 0, count: 65_536)
+    private var lastFragmentHeartbeat = -Double.infinity
 
     init(input: FileHandle, output: FileHandle, hasConsole: @escaping () -> Bool) {
         self.input = input
@@ -253,19 +254,44 @@ final class DesktopRelay {
     }
 
     private func forward(_ wire: WireSocket, token: String) throws -> Bool {
+        let out = output.fileDescriptor
+        let flags = fcntl(out, F_GETFL)
+        guard flags >= 0, fcntl(out, F_SETFL, flags | O_NONBLOCK) == 0 else { throw RexmoteError.disconnected }
+        defer { _ = fcntl(out, F_SETFL, flags) }
         var authenticated = false
-        while hasConsole() {
+        var pending = Data()
+        var written = 0
+        while true {
+            let signedIn = hasConsole()
+            // Finish a packet already on stdout before delivering the signed-out status.
+            guard signedIn || written > 0 else { return true }
             var fds = [
-                pollfd(fd: wire.fd, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: pending.isEmpty ? wire.fd : -1, events: Int16(POLLIN), revents: 0),
                 pollfd(fd: input.fileDescriptor, events: Int16(POLLIN), revents: 0),
+                pollfd(fd: pending.isEmpty ? -1 : out, events: Int16(POLLOUT), revents: 0),
             ]
-            let count = poll(&fds, 2, 12_000)
+            let count = poll(&fds, nfds_t(fds.count), 12_000)
             if count < 0 && errno == EINTR { continue }
             guard count > 0 else { throw RexmoteError.system("Desktop relay timed out.") }
+            if try !readClient(fds[1].revents, to: authenticated && signedIn ? wire : nil) { return false }
+            if fds[2].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 { throw RexmoteError.disconnected }
+            if fds[2].revents & Int16(POLLOUT) != 0 {
+                let count = pending.withUnsafeBytes { bytes in
+                    Darwin.write(out, bytes.baseAddress! + written, bytes.count - written)
+                }
+                if count < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                guard count > 0 else { throw RexmoteError.disconnected }
+                written += count
+                if written == pending.count {
+                    pending = Data()
+                    written = 0
+                }
+            }
             if fds[0].revents & Int16(POLLIN) != 0 {
                 for packet in try wire.receive() {
                     if authenticated {
-                        try send(packet)
+                        let bytes = try packet.encoded()
+                        if pending.isEmpty { pending = bytes } else { pending.append(bytes) }
                     } else {
                         guard case .hello(DesktopProtocol.version, token) = packet.message else {
                             throw RexmoteError.invalid("Unexpected desktop helper.")
@@ -273,19 +299,25 @@ final class DesktopRelay {
                         authenticated = true
                     }
                 }
+            } else if fds[0].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 {
+                throw RexmoteError.disconnected
             }
-            if try !readClient(fds[1].revents, to: authenticated ? wire : nil) { return false }
-            if fds[0].revents & Int16(POLLHUP | POLLERR | POLLNVAL) != 0 { throw RexmoteError.disconnected }
         }
-        return true
     }
 
     private func readClient(_ events: Int16, to wire: WireSocket?) throws -> Bool {
         if events & Int16(POLLIN) != 0 {
             let count = Darwin.read(input.fileDescriptor, &buffer, buffer.count)
-            if count < 0 && errno == EINTR { return true }
+            if count < 0 && (errno == EINTR || errno == EAGAIN) { return true }
             guard count > 0 else { return false }
-            for packet in try decoder.feed(Data(buffer.prefix(count))) {
+            let packets = try decoder.feed(Data(buffer.prefix(count)))
+            let now = ProcessInfo.processInfo.systemUptime
+            // During a slow paste, its trailing heartbeat cannot overtake the clipboard bytes.
+            if packets.isEmpty, let wire, now - lastFragmentHeartbeat >= 1 {
+                try wire.send(Packet(.heartbeat))
+                lastFragmentHeartbeat = now
+            }
+            for packet in packets {
                 try wire?.send(packet)
                 if case .quit = packet.message { return false }
             }

@@ -48,15 +48,17 @@ final class DesktopConnection: @unchecked Sendable {
                         throw RexmoteError.system("The sharing Mac stopped responding.")
                     }
                     if authenticated && now - heartbeat >= 1 {
-                        try stream.send(Packet(.heartbeat))
+                        self.send(Packet(.heartbeat))
                         heartbeat = now
                     }
                     var watch = pollfd(fd: stream.fd, events: Int16(POLLIN), revents: 0)
                     let n = poll(&watch, 1, 250)
                     if n == 0 || (n < 0 && errno == EINTR) { continue }
                     guard n > 0 else { throw RexmoteError.disconnected }
-                    for packet in try stream.receive() {
-                        lastSeen = now
+                    let packets = try stream.receive()
+                    // A large clipboard or desktop frame can span many reads on a slow link.
+                    lastSeen = ProcessInfo.processInfo.systemUptime
+                    for packet in packets {
                         if !authenticated {
                             guard case .hello(DesktopProtocol.version, link.expectedToken) = packet.message else {
                                 throw RexmoteError.invalid("Install the same version of Rexmote on both Macs.")
@@ -73,7 +75,7 @@ final class DesktopConnection: @unchecked Sendable {
                             try image.apply(frame, payload: packet.payload)
                             guard let pixels = image.image else { throw RexmoteError.invalid("Invalid desktop image.") }
                             DispatchQueue.main.sync { receive(.frame(frame, pixels)) }
-                            try stream.send(Packet(.acknowledge(frame.id)))
+                            self.send(Packet(.acknowledge(frame.id)))
                         case .status(let value):
                             if value.state == "signed-out" {
                                 image = FrameBuffer()
