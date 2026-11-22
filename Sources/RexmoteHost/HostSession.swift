@@ -54,15 +54,18 @@ final class CaptureOutput: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func disable() { lock.withLock { state = .stopped } }
     func stream(_ stream: SCStream, didStopWithError error: Error) { failed?(error.localizedDescription) }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, sample.isValid,
+        if type == .screen { offer(sample) }
+    }
+    func offer(_ sample: CMSampleBuffer) {
+        // A still desktop can deliver its only pixels in the first sample after a restart.
+        guard sample.isValid, CMSampleBufferDataIsReady(sample),
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
                 as? [[SCStreamFrameInfo: Any]],
-            attachments.first?[.status] as? Int == SCFrameStatus.complete.rawValue,
+            let rawStatus = attachments.first?[.status] as? Int, let status = SCFrameStatus(rawValue: rawStatus),
+            status == .started || status == .complete,
             let buffer = sample.imageBuffer
         else { return }
-        offer(CaptureImage(buffer: buffer, time: ProcessInfo.processInfo.systemUptime))
-    }
-    func offer(_ image: CaptureImage) {
+        let image = CaptureImage(buffer: buffer, time: ProcessInfo.processInfo.systemUptime)
         lock.withLock {
             switch state {
             case .starting: state = .starting(image)

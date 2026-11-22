@@ -3,6 +3,7 @@ import CoreVideo
 import Darwin
 import Foundation
 import RexmoteCore
+import ScreenCaptureKit
 import XCTest
 
 @testable import RexmoteCLI
@@ -138,6 +139,35 @@ final class DesktopSessionTests: XCTestCase {
         return CaptureImage(buffer: buffer, time: ProcessInfo.processInfo.systemUptime)
     }
 
+    private func sample(_ value: UInt8, status: SCFrameStatus = .complete) throws -> CMSampleBuffer {
+        let pixels = try image(value).buffer
+        let format = try CMVideoFormatDescription(imageBuffer: pixels)
+        let timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        let sample = try CMSampleBuffer(imageBuffer: pixels, formatDescription: format, sampleTiming: timing)
+        let key = CMSampleBuffer.PerSampleAttachmentsDictionary.Key(rawValue: SCStreamFrameInfo.status.rawValue as CFString)
+        sample.sampleAttachments[0][key] = status.rawValue
+        return sample
+    }
+
+    func testRestartedStreamSendsItsFirstFrameOnAnIdleDesktop() throws {
+        let received = expectation(description: "Initial keyframe after resize")
+        let pump = FramePump { packet, commit in
+            guard commit(), case .frame(let frame) = packet.message else { return }
+            XCTAssertTrue(frame.full)
+            var desktop = FrameBuffer()
+            try desktop.apply(frame, payload: packet.payload)
+            XCTAssertEqual(desktop.pixels, Data(repeating: 42, count: 16 * 16 * 4))
+            received.fulfill()
+        }
+        defer { pump.stop() }
+        let output = CaptureOutput(pump: pump)
+        output.offer(try sample(42, status: .started))
+        output.offer(try sample(99, status: .idle))
+        pump.configure(Configuration())
+        output.enable()
+        wait(for: [received], timeout: 2)
+    }
+
     @MainActor func testCaptureOnlyPublishesTheNewestStartupFrameAfterTheSessionIsActive() throws {
         let (host, client) = try helper { .active }
         let pump = host.pump
@@ -145,14 +175,14 @@ final class DesktopSessionTests: XCTestCase {
         pump.configure(Configuration(fps: 60))
 
         let abandoned = CaptureOutput(pump: pump)
-        abandoned.offer(try image(3))
+        abandoned.offer(try sample(3))
         abandoned.disable()
         abandoned.enable()
-        abandoned.offer(try image(4))
+        abandoned.offer(try sample(4))
 
         let output = CaptureOutput(pump: pump)
-        output.offer(try image(11))
-        output.offer(try image(99))
+        output.offer(try sample(11))
+        output.offer(try sample(99))
         var fd = pollfd(fd: client.fd, events: Int16(POLLIN), revents: 0)
         XCTAssertEqual(poll(&fd, 1, 50), 0)
         output.enable()
@@ -165,7 +195,7 @@ final class DesktopSessionTests: XCTestCase {
         pump.acknowledge(frame.id)
 
         output.disable()
-        output.offer(try image(188))
+        output.offer(try sample(188))
         output.enable()
         XCTAssertEqual(poll(&fd, 1, 50), 0)
     }
